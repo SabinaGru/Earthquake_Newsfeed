@@ -1,0 +1,262 @@
+# Ausgangslage
+
+Du arbeitest für eine Rückversicherung, die unter anderem auch mit Naturkatastrophen verbundenen Risiken arbeitet. Für dein Team sollst du einen Newsfeed mit der aktuellen Erdbebensituation anbieten, der kontinuierlich aktualisiert wird und die Erdbeben in den letzten 24 Stunden anzeigt. Du greifst dazu auf die globalen Erdbebendaten von US Geological Surveys zu. Konkret möchtest du über die JSON API auf die Daten zugreifen, die Erdbebeninformationen über die letzte Stunde, den letzten Tag, die letzte Woche und den letzten Monat anbietet. Die Links zu den einzelnen Datensätzen und eine Beschreibung der einzelnen Schlüsselwörter ist hier verfügbar: https://earthquake.usgs.gov/earthquakes/feed/v1.0/geojson.php Du schätzt den Aufwand für einen Proof-of-Concept auf einen (aufgerundeten) Tag und machst dich sofort an die Arbeit. Zusatzinfo Die schwachen Erdbeben in der Schweiz werden davon selten erfasst.
+
+# Aufgabenstellung
+
+## 1. Daten einlesen
+
+#### **Lade die Daten herunter und lese sie in eine geeignete Datenstruktur ein.**
+
+```{r}
+library(tidyverse)
+library(geojsonio)
+library(sf)
+library(jsonlite)
+library(leaflet)
+```
+
+```{r}
+api_url <- "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+
+json_data <- fromJSON(api_url)
+```
+
+#### Explorieren der Struktur des JSON-Objekts, auch mithilfe der Beschreibungen der einzelnen Schlüsselwörter. Wie ist die Hierarchie aufgebaut?
+
+```{r}
+str(json_data)
+head(json_data)
+```
+
+## 2. Daten aufbereiten
+
+#### JSON-Objekt mit geeignetem Manipulationen auf ein Data Frame ’flachdrücken’. Vereinen der hierarchischen Levels.
+
+```{r}
+df <- json_data$features
+df <- unnest(df, cols = c(properties, geometry), names_sep = "_")
+```
+
+```{r}
+# Prozentualer Anteil fehlender Werte 
+df |> 
+  summarise_all( \(x) {mean(is.na(x))*100} ) |>
+  mutate( summary="missing in percent", .before = 1 )
+```
+
+Grosser Anteil fehlende Werte -\> Spalten entfernen:
+
+properties_tz
+
+properties_felt
+
+properties_cdi
+
+properties_mmi
+
+properties_alert
+
+```{r}
+# Entferne Spalten mit mehr als 90% fehlenden Werten
+df_cleaned <- df %>%
+  select(where(~ mean(is.na(.)) < 0.9))
+
+# Überprüfe die bereinigten Daten
+print(df_cleaned)
+```
+
+```{r}
+# Prozentualer Anteil fehlender Werte 
+df_cleaned |> 
+  summarise_all( \(x) {mean(is.na(x))*100} ) |>
+  mutate( summary="missing in percent", .before = 1 )
+```
+
+```{r}
+str(df_cleaned)
+```
+
+#### Entferne nicht notwendige Spalten
+
+```{r}
+df_cleaned <- select(df_cleaned, -c(type, geometry_type, properties_title, properties_ids))
+```
+
+#### Konvertieren des Zeitstempels (Sekunden seit 1970, Unix Epoche) in ein Datumsformat und umbenennen.
+
+```{r}
+df <- df_cleaned %>%
+  mutate(
+    date = as.POSIXct(properties_time/1000, origin = "1970-01-01"),
+    update = as.POSIXct(properties_updated/1000, origin = "1970-01-01")
+  ) %>%
+  select(- c(properties_time, properties_updated))
+```
+
+#### Stelle sicher, dass du die Koordinaten in Form von Spalten ’lon’, ’lat’ und ’depth’ zur Verfügung hast. Prüfe ob Longitude und Latitude im zulässigen Bereich sind.
+
+```{r}
+str(df)
+```
+
+```{r}
+# Entpacke die 'geometry_coordinates' in separate Spalten
+df <- df %>%
+  unnest_wider(geometry_coordinates, names_sep = "_") %>%
+  rename(lon = geometry_coordinates_1,
+         lat = geometry_coordinates_2,
+         depth = geometry_coordinates_3)
+
+# Überprüfe, ob Longitude und Latitude im zulässigen Bereich sind
+df <- df %>%
+  filter(lon >= -180 & lon <= 180, lat >= -90 & lat <= 90)
+
+
+head(df)
+str(df)
+```
+
+## 3. Explorative Analyse
+
+#### Wie ist die Verteilung der Erdbebenstärken (Magnituden) im Datenset?
+
+```{r}
+# Erstelle ein Histogramm der Erdbebenstärken
+ggplot(df, aes(x = properties_mag)) +
+  geom_histogram(binwidth = 0.5, fill = "blue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Verteilung der Erdbebenstärken (Magnituden)",
+       x = "Magnitude",
+       y = "Häufigkeit") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Die meisten Erdbeben haben eine Magnitude zwischen 1 und 3.
+
+#### Wie sind die Tiefen der Epizentren verteilt?
+
+```{r}
+
+# Erstelle ein Histogramm der Tiefen der Epizentren
+ggplot(df, aes(x = depth)) +
+  geom_histogram(binwidth = 10, fill = "blue", color = "black", alpha = 0.7) +
+  theme_minimal() +
+  labs(title = "Verteilung der Tiefen der Epizentren",
+       x = "Tiefe (km)",
+       y = "Häufigkeit") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Die meisten Erdbeben treten in sehr geringen Tiefen auf.
+
+#### Sind Tsunami-Warnungen herausgegeben worden? Wenn ja wo?
+
+```{r}
+# Filtere den Datensatz nach Tsunami-Warnungen
+tsunami_warnings <- df %>%
+  filter(properties_tsunami == 1) %>%
+  select(properties_place, properties_tsunami)
+
+# Zeige die Orte mit Tsunami-Warnungen an
+print(tsunami_warnings)
+```
+
+Es wurden keine tsunami - warnungen ausgegeben
+
+#### Visualisiere alle Erdbeben geeignet auf einer Weltkarte. Bringe auch die Magnitude in die Visualisierung. Falls erwünscht kannst du die Karte auch interaktiv machen und mit Detailinformationen verlinken (Hier eignet sich Leaflet Express gut).
+
+```{r}
+map <- leaflet() %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addTiles("Erdbeben") %>%
+  addCircleMarkers(data = df, df$lon, df$lat, radius = ~properties_mag*5, color = "red")
+
+print(map)
+```
+
+## 4. Erdbeben-Newsfeed
+
+#### Erstelle nun eine Pipeline, die dir die Erdbebendaten herunterlädt, einliest und gemäss den vorherigen Aufgaben präprozessiert. Als Endprodukt soll ein Data Frame wie am Ende von Aufgabe 2 zur Verfügung stehen. Die Funktion soll als Argument die URL des JSON bekommen, dann kannst du deine Funktion auch mit Daten des letzten Monats laufen lassen ohne die Pipeline umzuschreiben. Wie lang braucht deine Pipeline, um das Data Frame zu ziehen und zu präprozessieren?
+
+```{r}
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+library(purrr)  # Für das Entpacken der Listen
+library(lubridate)
+
+# Definiere die Funktion zum Herunterladen, Einlesen und Präprozessieren der Daten
+process_earthquake_data <- function(url) {
+  
+  # Lade die Daten von der angegebenen URL
+  data <- fromJSON(url)
+  
+  # Extrahiere die relevanten Informationen aus dem JSON-Objekt
+  df_pipe <- data$features %>%
+    as_tibble() %>%
+    unnest_wider(properties, names_sep = "_")
+  
+  # Extrahiere die Koordinaten manuell aus der 'geometry_coordinates'-Spalte
+  df_pipe <- df_pipe %>%
+    mutate(
+      lon = map_dbl(geometry$coordinates, 1),  # Längengrad (erste Koordinate in der Liste)
+      lat = map_dbl(geometry$coordinates, 2),  # Breitengrad (zweite Koordinate in der Liste)
+      depth = map_dbl(geometry$coordinates, 3) # Tiefe (dritte Koordinate in der Liste)
+    )
+  
+  # Entferne die 'geometry'-Spalte, da wir die Koordinaten extrahiert haben
+  df_pipe <- df_pipe %>%
+    select(-geometry)
+  
+  # Zeitstempel in ein Datumsformat umwandeln
+  df_pipe <- df_pipe %>%
+    mutate(
+      date = as.POSIXct(properties_time / 1000, origin = "1970-01-01"),
+      update = as.POSIXct(properties_updated / 1000, origin = "1970-01-01")
+    ) %>%
+    select(-c(properties_time, properties_updated, type, properties_title, properties_ids))
+  
+  # Entferne Spalten mit > 90% fehlenden Werten
+  missing_percent <- df_pipe %>%
+    summarise_all(~ mean(is.na(.)) * 100)
+  
+  cols_to_remove <- names(missing_percent)[missing_percent >= 90]
+  df_pipe <- df_pipe %>%
+    select(-all_of(cols_to_remove))
+  
+  # Überprüfe, ob Longitude und Latitude im zulässigen Bereich sind
+  df_pipe <- df_pipe %>%
+    filter(lon >= -180 & lon <= 180, lat >= -90 & lat <= 90)
+  
+  return(df_pipe)
+}
+
+# Beispielaufruf der Funktion mit der URL für die Daten des letzten Tages
+url <- "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/all_day.geojson"
+earthquake_data <- process_earthquake_data(url)
+
+# Überprüfe die ersten Zeilen des resultierenden DataFrames
+head(earthquake_data)
+
+# Zeige die Struktur des resultierenden Data Frames
+str(earthquake_data)
+
+
+# Überprüfe die ersten Zeilen des resultierenden DataFrames
+print("Erste Zeilen des DataFrames:")
+head(earthquake_data)
+
+# Zeige die Struktur des resultierenden Data Frames
+print("Struktur des DataFrames:")
+str(earthquake_data)
+
+# Beispiel: Zeige, wie lange die Pipeline braucht, um die Daten zu verarbeiten
+start_time <- Sys.time()
+earthquake_data <- process_earthquake_data(url)
+end_time <- Sys.time()
+
+# Berechne und zeige die verstrichene Zeit
+elapsed_time <- end_time - start_time
+print(paste("Verarbeitungszeit:", elapsed_time, "Sekunden"))
+```
